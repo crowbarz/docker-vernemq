@@ -1,26 +1,90 @@
+ARG VERNEMQ_VERSION="1.12.0"
+ARG VERNEMQ_BUILD_TARGET=rel
+ARG VERNEMQ_REL_DIR=default
+## for rpi build, override VERNEMQ_BUILD_TARGET and VERNEMQ_REL_DIR:
+## docker build --build-arg VERNEMQ_BUILD_TARGET=rpi32 --build-arg VERNEMQ_REL_DIR=rpi32 .
+
+## Build binary in build environment
+FROM erlang:23.1.5-alpine AS build-env
+# FROM alpine:3.13 as build-env
+
+# Defaults
+ARG VERNEMQ_REPO=https://github.com/vernemq/vernemq.git
+ARG VERNEMQ_VERSION
+ARG VERNEMQ_BUILD_TARGET
+
+# Install vernemq build dependencies
+RUN apk --no-cache --update --available upgrade && \
+    apk add --no-cache coreutils ncurses-libs openssl-dev libstdc++ jq curl bash snappy-dev && \
+    addgroup --gid 10000 vernemq && \
+    adduser --uid 10000 -H -D -G vernemq -h /vernemq vernemq && \
+    install -d -o vernemq -g vernemq /vernemq && \
+    apk --update add --no-cache --virtual .build-deps wget ca-certificates && \
+    apk add --no-cache \
+        git \
+        make \
+        patch \
+        bsd-compat-headers \
+        g++
+    ## below required to install erlang on alpine:3.11 base image
+    ## 1.11.0 is built on erlang 22.3
+    ## alpine:3.11 only has 22.1 available
+    ## alpine:3.12 only has 23.0 available
+    ## alpine:3.13 has 23.1.5 available
+    # && \
+    #     erlang \
+    #     erlang-crypto \
+    #     erlang-syntax-tools \
+    #     erlang-parsetools \
+    #     erlang-inets \
+    #     erlang-ssl \
+    #     erlang-public-key \
+    #     erlang-eunit \
+    #     erlang-asn1 \
+    #     erlang-sasl \
+    #     erlang-erl-interface \
+    #     erlang-os-mon \
+    #     erlang-runtime-tools \
+    #     erlang-eldap \
+    #     erlang-tools \
+    #     erlang-dev
+
+WORKDIR /vernemq
+
+# RUN apk --no-cache --update --available upgrade && \
+#     apk add --no-cache git autoconf build-base bsd-compat-headers cmake coreutils curl openssl-dev bash
+
+# Clone vernemq from git repo and compile
+RUN git clone -b $VERNEMQ_VERSION $VERNEMQ_REPO . && \
+    make $VERNEMQ_BUILD_TARGET
+
+## Copy built binaries into final image
 FROM alpine:3.13
+
+ARG VERNEMQ_VERSION
+ARG VERNEMQ_REL_DIR
 
 RUN apk --no-cache --update --available upgrade && \
     apk add --no-cache ncurses-libs openssl libstdc++ jq curl bash snappy-dev && \
     addgroup --gid 10000 vernemq && \
-    adduser --uid 10000 -H -D -G vernemq -h /vernemq vernemq && \
-    install -d -o vernemq -g vernemq /vernemq
+    adduser --uid 10000 --system --ingroup vernemq --home /vernemq --disabled-password vernemq && \
+    addgroup vernemq xfs
+
+# NOTE: gid(xfs) on Alpine (container) == gid(www-data) on Debian
 
 # Defaults
 ENV DOCKER_VERNEMQ_KUBERNETES_LABEL_SELECTOR="app=vernemq" \
     DOCKER_VERNEMQ_LOG__CONSOLE=console \
     PATH="/vernemq/bin:$PATH" \
-    VERNEMQ_VERSION="1.12.0"
+    VERNEMQ_VERSION=$VERNEMQ_VERSION
 
 WORKDIR /vernemq
 
 COPY --chown=10000:10000 bin/vernemq.sh /usr/sbin/start_vernemq
 COPY --chown=10000:10000 files/vm.args /vernemq/etc/vm.args
+COPY --chown=10000:10000 --from=build-env /vernemq/_build/${VERNEMQ_REL_DIR}/rel/vernemq /vernemq
 
-RUN curl -L https://github.com/vernemq/vernemq/releases/download/$VERNEMQ_VERSION/vernemq-$VERNEMQ_VERSION.alpine.tar.gz -o /tmp/vernemq-$VERNEMQ_VERSION.alpine.tar.gz && \
-    tar -xzvf /tmp/vernemq-$VERNEMQ_VERSION.alpine.tar.gz && \
-    rm /tmp/vernemq-$VERNEMQ_VERSION.alpine.tar.gz && \
-    chown -R 10000:10000 /vernemq && \
+RUN chown -R 10000:10000 /vernemq && \
     ln -s /vernemq/etc /etc/vernemq && \
     ln -s /vernemq/data /var/lib/vernemq && \
     ln -s /vernemq/log /var/log/vernemq
